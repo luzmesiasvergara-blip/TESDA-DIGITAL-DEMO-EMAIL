@@ -1,0 +1,207 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 1. THE GLOBAL SAFETY NET
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // HELPER FUNCTIONS
+    // ===============================================================
+    
+    function isSignedIn() { return request.auth != null; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // Role-based helpers
+    function getUserData() {
+      let path = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(path) ? get(path).data : {};
+    }
+
+    function hasRole(role) {
+      let path = /databases/$(database)/documents/users/$(request.auth.uid);
+      return isSignedIn() && exists(path) && get(path).data.get('role', '') == role;
+    }
+
+    function isAdmin() {
+      let path = /databases/$(database)/documents/users/$(request.auth.uid);
+      let adminEmails = ["lmvergara@tesda.gov.ph", "domsrock123@gmail.com", "admin@tesda.gov.ph", "qso.csdd@tesda.gov.ph", "luzvergara0512@gmail.com", "luzmesiasvergara@gmail.com"];
+      return isSignedIn() && (
+        request.auth.token.email in adminEmails ||
+        (exists(path) && get(path).data.get('role', '') == 'Admin')
+      );
+    }
+
+    function isQSO() { return isAdmin() || hasRole('qso_admin'); }
+    function isCO() { return isAdmin() || hasRole('co_admin'); }
+    function isICTO() { return isAdmin() || hasRole('icto_admin'); }
+    function isDistrictOffice() { return isAdmin() || hasRole('DistrictOffice'); }
+    
+    function isDistrictMatch(districtId) {
+      let path = /databases/$(database)/documents/users/$(request.auth.uid);
+      return isAdmin() || (isDistrictOffice() && exists(path) && get(path).data.get('assignedDistrictId', '') == districtId);
+    }
+    function isTrainingCenter() { return isAdmin() || hasRole('TrainingCenter'); }
+    function isAssessmentCenter() { return isAdmin() || hasRole('AssessmentCenter'); }
+
+    // ===============================================================
+    // VALIDATION BLUEPRINTS
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'email', 'role']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 128 &&
+             data.email is string && data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$") &&
+             data.role in ['Learner', 'Admin', 'TrainingCenter', 'AssessmentCenter', 'DistrictOffice', 'Employer', 'qso_admin', 'co_admin', 'icto_admin'];
+    }
+
+    function isValidBadgeTemplate(data) {
+      return data.keys().hasAll(['programName', 'badgeType', 'status']) &&
+             data.programName is string && data.programName.size() > 0 &&
+             data.badgeType in ['Proficient', 'Expert', 'Skilled', 'Master'] &&
+             data.status in ['Active', 'Draft', 'Archived'];
+    }
+
+    function isValidIssuedBadge(data) {
+      return data.keys().hasAll(['learnerId', 'learnerName', 'badgeId', 'status', 'issuerId']) &&
+             data.status in ['Active', 'Expired', 'Revoked', 'Pending Approval', 'Approved', 'Rejected'];
+    }
+
+    function isValidLearner(data) {
+      return data.keys().hasAll(['firstName', 'lastName', 'email', 'status']) &&
+             data.status in ['Enrolled', 'Completed', 'Dropped'];
+    }
+
+    function isValidAssessmentRecord(data) {
+      return data.keys().hasAll(['learnerId', 'qualification', 'pathway', 'result', 'organizationId']) &&
+             data.pathway in ['National Competency Assessment', 'Recognition of Prior Learning (RPL)'] &&
+             data.result in ['Passed / Competent', 'Not Yet Competent', 'Pending Review'];
+    }
+
+    function isValidProgramOffering(data) {
+      return data.keys().hasAll(['trainingCenterId', 'programTitle', 'programType', 'status']) &&
+             data.programType in ["Unit of Competency", "Cluster of Competencies", "Full Qualification", "Micro-Credential"] &&
+             data.status in ["Draft", "Active", "Inactive", "Archived"];
+    }
+
+    function isValidProgramBatch(data) {
+      return data.keys().hasAll(['programOfferingId', 'trainingCenterId', 'batchName', 'status']) &&
+             data.status in ["Open", "Ongoing", "Completed", "Cancelled"];
+    }
+
+    function isValidEnrollment(data) {
+      return data.keys().hasAll(['learnerId', 'learnerName', 'trainingCenterId', 'programOfferingId', 'enrollmentStatus']) &&
+             data.enrollmentStatus in ["Applied", "Accepted", "Enrolled", "Completed", "Dropped", "Withdrawn"];
+    }
+
+    function isValidUCCompletion(data) {
+      return data.keys().hasAll(['enrollmentId', 'learnerId', 'trainingCenterId', 'ucTitle', 'completionStatus']) &&
+             data.completionStatus in ["In Progress", "Completed", "For Badge Request", "Badge Requested"];
+    }
+
+    function isValidBadgeRequest(data) {
+      return data.keys().hasAll(['requestType', 'trainingCenterId', 'programOfferingId', 'learnerIds', 'badgeTemplateId', 'status', 'districtOfficeId']) &&
+             data.requestType in ["Individual", "Batch", "UC"] &&
+             data.status in ["Pending Review", "Approved", "Rejected"];
+    }
+
+    // ===============================================================
+    // COLLECTION RULES
+    // ===============================================================
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || isAdmin() || isDistrictOffice() || isQSO() || isCO() || isICTO() || isTrainingCenter() || isAssessmentCenter());
+      allow list: if isSignedIn() && (isAdmin() || isDistrictOffice() || isQSO() || isCO() || isICTO() || isTrainingCenter() || isAssessmentCenter() || (resource.data.email == request.auth.token.email));
+      
+      allow create: if isSignedIn() && (isOwner(userId) || isAdmin() || isTrainingCenter() || isAssessmentCenter());
+      
+      allow update: if isAdmin() || (
+        isOwner(userId) && 
+        incoming().get('role', existing().get('role', 'Learner')) == existing().get('role', 'Learner')
+      ) || (
+        (isTrainingCenter() || isAssessmentCenter()) && 
+        existing().role == 'Learner' && 
+        incoming().role == 'Learner'
+      );
+      
+      allow delete: if isAdmin();
+    }
+
+    match /organizations/{orgId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /badgeTemplates/{templateId} {
+      allow read: if true;
+      allow write: if isQSO();
+    }
+
+    match /issuedBadges/{issuedBadgeId} {
+      allow read: if true; // Public verification allowed
+      allow create: if isSignedIn() && (isDistrictOffice() || isAdmin());
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /learners/{learnerId} {
+      allow read: if isSignedIn(); 
+      allow write: if isTrainingCenter() || isAssessmentCenter() || isAdmin();
+    }
+
+    match /programOfferings/{offeringId} {
+      allow read: if isSignedIn();
+      allow create: if isTrainingCenter() || isAdmin();
+      allow update: if isAdmin() || (isTrainingCenter() && existing().trainingCenterId == request.auth.uid);
+      allow delete: if isAdmin() || (isTrainingCenter() && existing().trainingCenterId == request.auth.uid);
+    }
+
+    match /programBatches/{batchId} {
+      allow read: if isSignedIn();
+      allow create: if isTrainingCenter() || isAdmin();
+      allow update: if isAdmin() || (isTrainingCenter() && existing().trainingCenterId == request.auth.uid);
+      allow delete: if isAdmin() || (isTrainingCenter() && existing().trainingCenterId == request.auth.uid);
+    }
+
+    match /enrollments/{enrollmentId} {
+      allow read: if isSignedIn(); 
+      allow create: if isSignedIn();
+      allow update: if isTrainingCenter() || isAdmin() || (isSignedIn() && existing().learnerId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    match /ucCompletions/{completionId} {
+      allow read: if isSignedIn();
+      allow create: if isTrainingCenter() || isAdmin();
+      allow update: if isTrainingCenter() || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /badgeRequests/{requestId} {
+      allow read: if isSignedIn() && (
+        isAdmin() || 
+        isDistrictMatch(resource.data.get('districtOfficeId', '')) ||
+        resource.data.trainingCenterId == request.auth.uid ||
+        (resource.data.get('learnerIds', []) != null && request.auth.uid in resource.data.learnerIds)
+      );
+      allow create: if isTrainingCenter() || isAssessmentCenter() || isAdmin();
+      allow update: if (isDistrictOffice() && isDistrictMatch(existing().get('districtOfficeId', ''))) || isAdmin() || (isQSO() && isValidBadgeRequest(incoming()));
+      allow delete: if isAdmin();
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin() || isCO() || isICTO() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn();
+    }
+
+    match /badges/{badgeId} {
+      allow read: if true;
+      allow write: if isQSO();
+    }
+  }
+}
